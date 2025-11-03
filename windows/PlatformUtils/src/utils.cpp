@@ -178,25 +178,26 @@ std::string AkVCam::locateAltMFPluginPath()
 
 bool AkVCam::supportsMediaFoundationVCam()
 {
-    auto servicePath = locateMFServicePath();
+    return false;
+    // auto servicePath = locateMFServicePath();
 
-    if (servicePath.empty())
-        return false;
+    // if (servicePath.empty())
+    //     return false;
 
-    auto pluginPath = locateMFPluginPath();
+    // auto pluginPath = locateMFPluginPath();
 
-    if (pluginPath.empty())
-        return false;
+    // if (pluginPath.empty())
+    //     return false;
 
-    auto mfsensorgroupHnd = LoadLibrary(TEXT("mfsensorgroup.dll"));
+    // auto mfsensorgroupHnd = LoadLibrary(TEXT("mfsensorgroup.dll"));
 
-    if (!mfsensorgroupHnd)
-        return false;
+    // if (!mfsensorgroupHnd)
+    //     return false;
 
-    bool supported = GetProcAddress(mfsensorgroupHnd, "MFCreateVirtualCamera") != nullptr;
-    FreeLibrary(mfsensorgroupHnd);
+    // bool supported = GetProcAddress(mfsensorgroupHnd, "MFCreateVirtualCamera") != nullptr;
+    // FreeLibrary(mfsensorgroupHnd);
 
-    return supported;
+    // return supported;
 }
 
 std::string AkVCam::tempPath()
