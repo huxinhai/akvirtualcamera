@@ -1533,6 +1533,13 @@ int AkVCam::CmdParserPrivate::stream(const StringMap &flags,
 #ifdef _WIN32
     // Set std::cin in binary mode.
     _setmode(_fileno(stdin), _O_BINARY);
+    
+    // Increase stdin buffer size to 32MB for better pipe performance
+    // This significantly improves frame receiving rate from FFmpeg
+    // 32MB can buffer ~1.78 seconds of 640x480@30fps YUY2 video (18MB/s)
+    const size_t stdinBufferSize = 32 * 1024 * 1024; // 32MB buffer
+    static char* stdinBuffer = new char[stdinBufferSize];
+    setvbuf(stdin, stdinBuffer, _IOFBF, stdinBufferSize);
 #endif
 
     auto clock = [] (const std::chrono::time_point<std::chrono::high_resolution_clock> &since) -> double {
