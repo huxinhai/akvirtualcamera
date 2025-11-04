@@ -25,6 +25,9 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
 #include <dshow.h>
 
 #include "pin.h"
@@ -85,6 +88,8 @@ namespace AkVCam
             LONG m_colorEnable {1};
             bool m_isRgb {false};
             bool m_frameReady {false};
+            std::ofstream m_frameLogFile;
+            std::mutex m_logMutex;
 
             void sendFrameOneShot();
             void sendFrameLoop();
@@ -95,6 +100,7 @@ namespace AkVCam
                                         LONG value,
                                         LONG flags);
             VideoFrame randomFrame();
+            void logFrame(const std::string &message);
     };
 }
 
@@ -171,11 +177,29 @@ AkVCam::Pin::Pin(BaseFilter *baseFilter,
         this->d->m_videoProcAmp->connectPropertyChanged(this->d,
                                                         &PinPrivate::propertyChanged);
     }
+    
+    // 初始化帧日志文件
+    CHAR tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    std::string logFilePath = std::string(tempPath) + "AkVCam_Frame_Log.txt";
+    this->d->m_frameLogFile.open(logFilePath, std::ios::out | std::ios::app);
+    
+    if (this->d->m_frameLogFile.is_open()) {
+        this->d->logFrame("=== Frame Log Started ===");
+        AkLogInfo() << "Frame log file created at: " << logFilePath << std::endl;
+    }
 }
 
 AkVCam::Pin::~Pin()
 {
     AkLogFunction();
+    
+    // 关闭帧日志文件
+    if (this->d->m_frameLogFile.is_open()) {
+        this->d->logFrame("=== Frame Log Stopped ===");
+        this->d->m_frameLogFile.close();
+    }
+    
     this->d->m_mediaTypes->Release();
 
     if (this->d->m_connectedTo)
@@ -300,6 +324,18 @@ void AkVCam::Pin::frameReady(const VideoFrame &frame, bool isActive)
     deleteMediaType(&mediaType);
 
     AkLogInfo() << "Active: " << isActive << std::endl;
+    
+    // 记录接收帧的详细信息到专用日志文件
+    if (isActive && frame) {
+        std::stringstream ss;
+        ss << "[FRAME RECEIVE] "
+           << "Size: " << frame.size() << " bytes, "
+           << "Format: " << frame.format().width() << "x" << frame.format().height() << ", "
+           << "PixelFormat: " << VideoFormat::pixelFormatToString(frame.format().format());
+        this->d->logFrame(ss.str());
+        
+        AkLogInfo() << ss.str() << std::endl;
+    }
 
     this->d->m_mutex.lock();
 
@@ -951,6 +987,20 @@ HRESULT AkVCam::PinPrivate::sendFrame()
     sample->SetDiscontinuity(false);
     sample->SetSyncPoint(true);
     sample->SetPreroll(false);
+    
+    // 记录发送帧的详细信息到专用日志文件
+    std::stringstream ss;
+    ss << "[FRAME SEND] "
+       << "PTS: " << startTime << ", "
+       << "Duration: " << duration << ", "
+       << "Size: " << size << " bytes, "
+       << "FPS: " << fps.value() << ", "
+       << "FrameReady: " << (this->m_frameReady ? "YES" : "NO") << ", "
+       << "Clock: " << clock << ", "
+       << "Drift: " << this->m_ptsDrift;
+    this->logFrame(ss.str());
+    
+    AkLogInfo() << ss.str() << std::endl;
     AkLogInfo() << "Sending " << stringFromMediaSample(sample) << std::endl;
     auto result = this->m_memInputPin->Receive(sample);
     AkLogInfo() << "Frame sent" << std::endl;
@@ -1063,4 +1113,27 @@ AkVCam::VideoFrame AkVCam::PinPrivate::randomFrame()
     });
 
     return this->m_videoAdjusts.adjust(frame);
+}
+
+void AkVCam::PinPrivate::logFrame(const std::string &message)
+{
+    if (!this->m_frameLogFile.is_open())
+        return;
+    
+    std::lock_guard<std::mutex> lock(this->m_logMutex);
+    
+    // 获取当前时间戳
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    
+    struct tm timeInfo;
+    localtime_s(&timeInfo, &time_t_now);
+    
+    // 写入日志
+    this->m_frameLogFile << std::put_time(&timeInfo, "%Y-%m-%d %H:%M:%S")
+                         << "." << std::setfill('0') << std::setw(3) << ms.count()
+                         << " - " << message << std::endl;
+    this->m_frameLogFile.flush();
 }
