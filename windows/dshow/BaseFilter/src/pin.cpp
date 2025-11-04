@@ -229,7 +229,7 @@ HRESULT AkVCam::Pin::stateChanged(void *userData, FILTER_STATE state)
         self->d->m_ptsDrift = 0;
 
         self->d->m_sendFrameEvent =
-                CreateSemaphore(nullptr, 1, 1, TEXT("SendFrame"));
+                CreateSemaphore(nullptr, 0, 10, TEXT("SendFrame"));  // Initial=0, Max=10 to allow signal queuing
 
         self->d->m_running = true;
         self->d->m_sendFrameThread =
@@ -289,7 +289,7 @@ HRESULT AkVCam::Pin::stateChanged(void *userData, FILTER_STATE state)
 void AkVCam::Pin::frameReady(const VideoFrame &frame, bool isActive)
 {
     AkLogFunction();
-    AkLogInfo() << "Running: " << this->d->m_running << std::endl;
+    AkLogDebug() << "frameReady called, isActive=" << isActive << std::endl;
 
     if (!this->d->m_running)
         return;
@@ -299,45 +299,63 @@ void AkVCam::Pin::frameReady(const VideoFrame &frame, bool isActive)
     auto format = formatFromMediaType(mediaType);
     deleteMediaType(&mediaType);
 
-    AkLogInfo() << "Active: " << isActive << std::endl;
-
-    this->d->m_mutex.lock();
+    // Process frame OUTSIDE of the lock to avoid blocking sendFrame()
+    VideoFrame processedFrame;
+    bool hasFrame = false;
 
     if (this->d->m_baseFilter->directMode()) {
         if (isActive && frame && format.isSameFormat(frame.format())) {
-            memcpy(this->d->m_currentFrame.data(),
-                   frame.constData(),
-                   frame.size());
-            this->d->m_frameReady = true;
+            // In direct mode, just copy the frame data (quick operation)
+            processedFrame = frame;
+            hasFrame = true;
         } else if (!isActive && this->d->m_testFrame) {
-            this->d->m_currentFrame =
-                    this->d->applyAdjusts(this->d->m_testFrame);
-            this->d->m_frameReady = true;
-        } else {
-            this->d->m_frameReady = false;
+            // Apply adjustments to test frame (slow operation, but outside lock)
+            processedFrame = this->d->applyAdjusts(this->d->m_testFrame);
+            hasFrame = processedFrame.size() > 0;
         }
     } else {
-        auto frameAdjusted =
-                this->d->applyAdjusts(isActive? frame: this->d->m_testFrame);
-
-        if (frameAdjusted) {
-            this->d->m_currentFrame = frameAdjusted;
-            this->d->m_frameReady = true;
-        } else {
-            this->d->m_frameReady = false;
+        // Apply adjustments BEFORE acquiring the lock (slow operation)
+        auto frameToProcess = isActive ? frame : this->d->m_testFrame;
+        if (frameToProcess) {
+            processedFrame = this->d->applyAdjusts(frameToProcess);
+            hasFrame = processedFrame.size() > 0;
         }
     }
 
-    this->d->m_mutex.unlock();
+    // Now acquire lock for minimal time - just to update the shared data
+    {
+        std::lock_guard<std::mutex> lock(this->d->m_mutex);
+        
+        if (hasFrame) {
+            if (this->d->m_baseFilter->directMode() && isActive) {
+                // Fast path: direct memcpy in direct mode
+                memcpy(this->d->m_currentFrame.data(),
+                       processedFrame.constData(),
+                       std::min(processedFrame.size(), this->d->m_currentFrame.size()));
+            } else {
+                // Assign the already-processed frame
+                this->d->m_currentFrame = processedFrame;
+            }
+            this->d->m_frameReady = true;
+            AkLogDebug() << "Frame updated, size=" << processedFrame.size() << std::endl;
+        } else {
+            this->d->m_frameReady = false;
+            AkLogDebug() << "No valid frame" << std::endl;
+        }
+    }
 }
 
 void AkVCam::Pin::setPicture(const std::string &picture)
 {
     AkLogFunction();
     AkLogDebug() << "Picture: " << picture << std::endl;
-    this->d->m_mutex.lock();
-    this->d->m_testFrame = loadPicture(picture);
-    this->d->m_mutex.unlock();
+    
+    // Load picture OUTSIDE of lock (I/O operation is slow)
+    auto newFrame = loadPicture(picture);
+    
+    // Only lock for the quick assignment
+    std::lock_guard<std::mutex> lock(this->d->m_mutex);
+    this->d->m_testFrame = newFrame;
 }
 
 void AkVCam::Pin::setControls(const std::map<std::string, int> &controls)
@@ -560,8 +578,8 @@ HRESULT AkVCam::Pin::Connect(IPin *pReceivePin, const AM_MEDIA_TYPE *pmt)
     memInputPin->GetAllocatorRequirements(&allocatorRequirements);
     auto videoFormat = formatFromMediaType(mediaType);
 
-    if (allocatorRequirements.cBuffers < 1)
-        allocatorRequirements.cBuffers = 1;
+    if (allocatorRequirements.cBuffers < 3)
+        allocatorRequirements.cBuffers = 3;  // Use 3 buffers for better throughput
 
     allocatorRequirements.cbBuffer = LONG(videoFormat.dataSize());
 
@@ -872,14 +890,19 @@ void AkVCam::PinPrivate::sendFrameLoop()
 HRESULT AkVCam::PinPrivate::sendFrame()
 {
     AkLogFunction();
+    AkLogDebug() << "Getting buffer..." << std::endl;
     IMediaSample *sample = nullptr;
 
     if (FAILED(this->m_memAllocator->GetBuffer(&sample,
                                                nullptr,
                                                nullptr,
                                                0))
-        || !sample)
+        || !sample) {
+        AkLogError() << "Failed to get buffer" << std::endl;
         return E_FAIL;
+    }
+
+    AkLogDebug() << "Buffer acquired" << std::endl;
 
     BYTE *pData = nullptr;
     LONG size = sample->GetSize();
@@ -890,33 +913,42 @@ HRESULT AkVCam::PinPrivate::sendFrame()
         return E_FAIL;
     }
 
-    this->m_mutex.lock();
+    // Copy frame data with minimal lock time
+    bool copied = false;
+    {
+        std::lock_guard<std::mutex> lock(this->m_mutex);
 
-    if (this->m_frameReady && this->m_currentFrame.size() > 0) {
-        if (this->m_isRgb) {
-            auto line = pData;
-            auto lineSize = this->m_currentFrame.lineSize(0);
-            auto height = this->m_currentFrame.format().height();
+        if (this->m_frameReady && this->m_currentFrame.size() > 0) {
+            if (this->m_isRgb) {
+                // RGB format needs vertical flip
+                auto line = pData;
+                auto lineSize = this->m_currentFrame.lineSize(0);
+                auto height = this->m_currentFrame.format().height();
 
-            for (int y = 0; y < height; ++y) {
-                memcpy(line, this->m_currentFrame.constLine(0, height - y - 1), lineSize);
-                line += lineSize;
+                for (int y = 0; y < height; ++y) {
+                    memcpy(line, this->m_currentFrame.constLine(0, height - y - 1), lineSize);
+                    line += lineSize;
+                }
+            } else {
+                // YUV or other formats - direct copy
+                auto copyBytes = std::min(size_t(size), this->m_currentFrame.size());
+
+                if (copyBytes > 0)
+                    memcpy(pData, this->m_currentFrame.constData(), copyBytes);
             }
-        } else {
-            auto copyBytes = std::min(size_t(size), this->m_currentFrame.size());
-
-            if (copyBytes > 0)
-                memcpy(pData, this->m_currentFrame.constData(), copyBytes);
+            copied = true;
         }
-    } else {
+    }  // Lock released here
+
+    // Generate random frame if no real frame available (outside of lock)
+    if (!copied) {
+        AkLogDebug() << "No frame ready, generating random frame" << std::endl;
         auto frame = this->randomFrame();
         auto copyBytes = std::min(size_t(size), frame.size());
 
         if (copyBytes > 0)
             memcpy(pData, frame.constData(), copyBytes);
     }
-
-    this->m_mutex.unlock();
 
     REFERENCE_TIME clock = 0;
     this->m_baseFilter->referenceClock()->GetTime(&clock);
