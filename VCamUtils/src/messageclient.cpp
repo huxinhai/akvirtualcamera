@@ -85,7 +85,8 @@ bool AkVCam::MessageClient::isUp(uint16_t port)
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(port);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    // serverAddress.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     // Connect to the server
     if (connect(clientSocket,
@@ -234,12 +235,13 @@ bool AkVCam::MessageClientPrivate::connection(uint16_t port,
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(port);
+    serverAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     //是否使用套接字
     // #ifdef _WIN32
     // Windows needs explicit 127.0.0.1 instead of INADDR_ANY for local connections
     // inet_pton(AF_INET, "127.0.0.1", &serverAddress.sin_addr);
 // #else
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    // serverAddress.sin_addr.s_addr = INADDR_ANY;
 // #endif
     
 
