@@ -84,7 +84,7 @@ bool AkVCam::MessageClient::isUp(uint16_t port)
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(port);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     // Connect to the server
     if (connect(clientSocket,
@@ -234,7 +234,7 @@ bool AkVCam::MessageClientPrivate::connection(uint16_t port,
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_port = htons(port);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     // Connect to the server
     if (connect(clientSocket,
