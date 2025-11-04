@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -85,6 +86,8 @@ namespace AkVCam
             LONG m_colorEnable {1};
             bool m_isRgb {false};
             bool m_frameReady {false};
+            std::chrono::steady_clock::time_point m_lastFrameTime;
+            int m_frameCount {0};
 
             void sendFrameOneShot();
             void sendFrameLoop();
@@ -228,8 +231,9 @@ HRESULT AkVCam::Pin::stateChanged(void *userData, FILTER_STATE state)
         self->d->m_pts = -1;
         self->d->m_ptsDrift = 0;
 
+        // Use auto-reset event to prevent signal accumulation (was causing 60fps instead of 30fps)
         self->d->m_sendFrameEvent =
-                CreateSemaphore(nullptr, 0, 10, TEXT("SendFrame"));  // Initial=0, Max=10 to allow signal queuing
+                CreateEvent(nullptr, FALSE, FALSE, TEXT("SendFrame"));
 
         self->d->m_running = true;
         self->d->m_sendFrameThread =
@@ -578,8 +582,30 @@ HRESULT AkVCam::Pin::Connect(IPin *pReceivePin, const AM_MEDIA_TYPE *pmt)
     memInputPin->GetAllocatorRequirements(&allocatorRequirements);
     auto videoFormat = formatFromMediaType(mediaType);
 
-    if (allocatorRequirements.cBuffers < 3)
-        allocatorRequirements.cBuffers = 3;  // Use 3 buffers for better throughput
+    // Smart buffer configuration based on resolution
+    int minBuffers = 3;  // Default for 1080p
+    int pixels = videoFormat.width() * videoFormat.height();
+    
+    if (pixels >= 3840 * 2160) {
+        // 4K: Use fewer buffers (memory consideration)
+        minBuffers = 3;
+    } else if (pixels >= 1920 * 1080) {
+        // 1080p: Balanced configuration
+        minBuffers = 4;
+    } else if (pixels >= 1280 * 720) {
+        // 720p: Can afford more buffers
+        minBuffers = 5;
+    } else {
+        // ≤480p: Memory is cheap at this resolution
+        minBuffers = 5;
+    }
+    
+    if (allocatorRequirements.cBuffers < minBuffers)
+        allocatorRequirements.cBuffers = minBuffers;
+    
+    AkLogInfo() << "Buffer count: " << allocatorRequirements.cBuffers 
+                << " for " << videoFormat.width() << "x" << videoFormat.height() 
+                << std::endl;
 
     allocatorRequirements.cbBuffer = LONG(videoFormat.dataSize());
 
@@ -864,9 +890,28 @@ void AkVCam::PinPrivate::sendFrameOneShot()
 void AkVCam::PinPrivate::sendFrameLoop()
 {
     AkLogFunction();
+    this->m_lastFrameTime = std::chrono::steady_clock::now();
+    this->m_frameCount = 0;
 
     while (this->m_running) {
-        WaitForSingleObject(this->m_sendFrameEvent, INFINITE);
+        auto waitResult = WaitForSingleObject(this->m_sendFrameEvent, INFINITE);
+        
+        if (waitResult != WAIT_OBJECT_0) {
+            AkLogError() << "Wait failed: " << waitResult << std::endl;
+            continue;
+        }
+
+        // Log frame timing every 30 frames
+        if (++this->m_frameCount % 30 == 0) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - this->m_lastFrameTime).count();
+            auto actualFps = 30000.0 / elapsed;
+            AkLogInfo() << "Actual sending rate: " << actualFps << " fps (30 frames in " 
+                        << elapsed << "ms)" << std::endl;
+            this->m_lastFrameTime = now;
+        }
+
         auto result = this->sendFrame();
 
         if (FAILED(result)) {
