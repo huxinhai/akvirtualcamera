@@ -253,10 +253,18 @@ HRESULT AkVCam::Pin::stateChanged(void *userData, FILTER_STATE state)
         auto fps = videoFormat.fps();
         auto period = REFERENCE_TIME(TIME_BASE / fps.value());
 
+        AkLogInfo() << "=== FRAME TIMING CONFIG ===" << std::endl;
+        AkLogInfo() << "Target FPS: " << fps.value() << std::endl;
+        AkLogInfo() << "Period (100ns units): " << period << std::endl;
+        AkLogInfo() << "Period (ms): " << (period / 10000.0) << std::endl;
+        AkLogInfo() << "TIME_BASE: " << TIME_BASE << std::endl;
+
         clock->AdvisePeriodic(now,
                               period,
                               HSEMAPHORE(self->d->m_sendFrameEvent),
                               &self->d->m_adviseCookie);
+        
+        AkLogInfo() << "AdvisePeriodic called, cookie: " << self->d->m_adviseCookie << std::endl;
         self->d->m_frameReady = false;
         self->d->m_currentFrame = {videoFormat};
         self->d->m_videoConverter.setOutputFormat(videoFormat);
@@ -892,13 +900,25 @@ void AkVCam::PinPrivate::sendFrameLoop()
     AkLogFunction();
     this->m_lastFrameTime = std::chrono::steady_clock::now();
     this->m_frameCount = 0;
+    
+    AkLogInfo() << "=== FRAME SEND LOOP STARTED ===" << std::endl;
+    AkLogInfo() << "Thread ID: " << std::this_thread::get_id() << std::endl;
 
     while (this->m_running) {
+        auto waitStart = std::chrono::steady_clock::now();
         auto waitResult = WaitForSingleObject(this->m_sendFrameEvent, INFINITE);
+        auto waitEnd = std::chrono::steady_clock::now();
+        auto waitMs = std::chrono::duration_cast<std::chrono::milliseconds>(waitEnd - waitStart).count();
         
         if (waitResult != WAIT_OBJECT_0) {
             AkLogError() << "Wait failed: " << waitResult << std::endl;
             continue;
+        }
+
+        // Log first 10 frames individually for diagnosis
+        if (this->m_frameCount < 10) {
+            AkLogInfo() << "Frame #" << this->m_frameCount 
+                        << " - Wait time: " << waitMs << "ms" << std::endl;
         }
 
         // Log frame timing every 30 frames
@@ -907,8 +927,10 @@ void AkVCam::PinPrivate::sendFrameLoop()
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - this->m_lastFrameTime).count();
             auto actualFps = 30000.0 / elapsed;
-            AkLogInfo() << "Actual sending rate: " << actualFps << " fps (30 frames in " 
-                        << elapsed << "ms)" << std::endl;
+            AkLogInfo() << "=== PERFORMANCE CHECK ===" << std::endl;
+            AkLogInfo() << "Actual sending rate: " << actualFps << " fps" << std::endl;
+            AkLogInfo() << "30 frames sent in: " << elapsed << "ms" << std::endl;
+            AkLogInfo() << "Average wait time: " << (elapsed / 30.0) << "ms per frame" << std::endl;
             this->m_lastFrameTime = now;
         }
 
@@ -926,6 +948,8 @@ void AkVCam::PinPrivate::sendFrameLoop()
         }
     }
 
+    AkLogInfo() << "=== FRAME SEND LOOP ENDED ===" << std::endl;
+    AkLogInfo() << "Total frames sent: " << this->m_frameCount << std::endl;
     AkLogInfo() << "Thread "
                 << std::this_thread::get_id()
                 << " finnished"
