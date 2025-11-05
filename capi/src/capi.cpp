@@ -18,7 +18,11 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <fstream>
+#include <mutex>
+#include <windows.h>
 
 #include "capi.h"
 #include "PlatformUtils/src/preferences.h"
@@ -950,6 +954,51 @@ CAPI_EXPORT int vcam_stream_start(void *vcam, const char *device_id)
     return 0;
 }
 
+// ✅ 日志记录函数：记录 vcam_stream_send 的每一步
+static void writeCapiSendLog(const std::string &step, 
+                              const std::string &info = "")
+{
+    static std::ofstream logFile;
+    static std::mutex logMutex;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        // 获取 Windows 临时目录
+        CHAR tempPath[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempPath);
+        std::string logFilePath = std::string(tempPath) + "AkVCam_CAPI_Send_Log.txt";
+        
+        logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
+        initialized = true;
+    }
+    
+    if (logFile.is_open()) {
+        std::lock_guard<std::mutex> lock(logMutex);
+        
+        // 获取当前时间戳（毫秒精度）
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        
+        std::tm tm_buf;
+        localtime_s(&tm_buf, &time_t);
+        
+        char timeStr[64];
+        auto msValue = static_cast<long long>(ms.count());
+        std::snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
+        
+        logFile << timeStr << " - [CAPI SEND] " << step;
+        if (!info.empty()) {
+            logFile << " | " << info;
+        }
+        logFile << std::endl;
+        logFile.flush();
+    }
+}
+
 CAPI_EXPORT int vcam_stream_send(void *vcam,
                                  const char *device_id,
                                  const char *format,
@@ -958,48 +1007,89 @@ CAPI_EXPORT int vcam_stream_send(void *vcam,
                                  const char **data,
                                  size_t *line_size)
 {
+    auto functionStartTime = std::chrono::high_resolution_clock::now();
+    
     // Validate vcam and device_id
     auto vcamApi = reinterpret_cast<VCamAPI *>(vcam);
+    writeCapiSendLog("1. 函数开始", "vcam验证");
 
-    if (!vcamApi || !device_id)
+    if (!vcamApi || !device_id) {
+        writeCapiSendLog("1. 函数结束", "错误: vcam或device_id为空");
         return -EINVAL;
+    }
 
     // Check if device_id exists
+    auto checkDeviceStartTime = std::chrono::high_resolution_clock::now();
     auto deviceList = vcamApi->m_bridge.devices();
     std::string deviceIdStr(device_id);
+    auto checkDeviceEndTime = std::chrono::high_resolution_clock::now();
+    auto checkDeviceDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkDeviceEndTime - checkDeviceStartTime).count();
+    writeCapiSendLog("2. 获取设备列表", 
+                     "耗时: " + std::to_string(checkDeviceDuration) + "μs | 设备: " + deviceIdStr);
 
     if (std::find(deviceList.begin(),
                   deviceList.end(),
-                  deviceIdStr) == deviceList.end())
+                  deviceIdStr) == deviceList.end()) {
+        writeCapiSendLog("2. 函数结束", "错误: 设备不存在");
         return -EINVAL;
+    }
 
     // Validate format
-    if (!format)
+    if (!format) {
+        writeCapiSendLog("3. 函数结束", "错误: format为空");
         return -EINVAL;
+    }
 
     // Convert and validate format
+    auto convertFormatStartTime = std::chrono::high_resolution_clock::now();
     auto fourCC = AkVCam::pixelFormatFromCommonString(format);
+    auto convertFormatEndTime = std::chrono::high_resolution_clock::now();
+    auto convertFormatDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        convertFormatEndTime - convertFormatStartTime).count();
+    writeCapiSendLog("4. 转换格式", 
+                     "耗时: " + std::to_string(convertFormatDuration) + "μs | 格式: " + std::string(format) + " -> fourCC: " + std::to_string(fourCC));
 
-    if (fourCC == 0)
+    if (fourCC == 0) {
+        writeCapiSendLog("4. 函数结束", "错误: 格式转换失败");
         return -EINVAL;
+    }
 
     // Check if format is supported
+    auto checkFormatStartTime = std::chrono::high_resolution_clock::now();
     auto formatList =
             vcamApi->m_bridge.supportedPixelFormats(AkVCam::IpcBridge::StreamType_Output);
+    auto checkFormatEndTime = std::chrono::high_resolution_clock::now();
+    auto checkFormatDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkFormatEndTime - checkFormatStartTime).count();
+    writeCapiSendLog("5. 检查格式支持", 
+                     "耗时: " + std::to_string(checkFormatDuration) + "μs");
 
     if (std::find(formatList.begin(),
                   formatList.end(),
-                  fourCC) == formatList.end())
+                  fourCC) == formatList.end()) {
+        writeCapiSendLog("5. 函数结束", "错误: 格式不支持");
         return -EINVAL;
+    }
 
     // Validate dimensions and pointers
-    if (width < 1 || height < 1 || !data || !line_size)
+    if (width < 1 || height < 1 || !data || !line_size) {
+        writeCapiSendLog("6. 函数结束", "错误: 参数无效");
         return -EINVAL;
+    }
 
     // Create video format and frame
+    auto createFrameStartTime = std::chrono::high_resolution_clock::now();
     AkVCam::VideoFrame frame({fourCC, width, height, {30, 1}});
+    auto createFrameEndTime = std::chrono::high_resolution_clock::now();
+    auto createFrameDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        createFrameEndTime - createFrameStartTime).count();
+    writeCapiSendLog("7. 创建VideoFrame", 
+                     "耗时: " + std::to_string(createFrameDuration) + "μs | 尺寸: " + 
+                     std::to_string(width) + "x" + std::to_string(height));
 
     // Copy data to frame for each plane
+    auto copyDataStartTime = std::chrono::high_resolution_clock::now();
     for (size_t plane = 0; plane < frame.planes(); ++plane) {
         if (!data[plane] || line_size[plane] < 1)
             continue;
@@ -1013,9 +1103,27 @@ CAPI_EXPORT int vcam_stream_send(void *vcam,
             std::memcpy(line, srcLine, copySize);
         }
     }
+    auto copyDataEndTime = std::chrono::high_resolution_clock::now();
+    auto copyDataDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        copyDataEndTime - copyDataStartTime).count();
+    writeCapiSendLog("8. 复制数据到帧", 
+                     "耗时: " + std::to_string(copyDataDuration) + "μs | 帧大小: " + 
+                     std::to_string(frame.size()) + " bytes");
 
     // Write frame to device
+    auto writeStartTime = std::chrono::high_resolution_clock::now();
     vcamApi->m_bridge.write(deviceIdStr, frame);
+    auto writeEndTime = std::chrono::high_resolution_clock::now();
+    auto writeDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        writeEndTime - writeStartTime).count();
+    writeCapiSendLog("9. 写入到bridge", 
+                     "耗时: " + std::to_string(writeDuration) + "ms");
+
+    auto functionEndTime = std::chrono::high_resolution_clock::now();
+    auto functionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        functionEndTime - functionStartTime).count();
+    writeCapiSendLog("10. 函数结束", 
+                     "总耗时: " + std::to_string(functionDuration) + "ms | 返回: 0");
 
     return 0;
 }

@@ -751,8 +751,9 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
         
         bool usedLockedWrite = false;  // 标记是否使用了锁写入
         
-        // ✅ 如果 lock 失败，使用保存的 buffer 指针直接覆盖（无锁写入）
+        // ✅ 完全无锁写入：推送方完全控制时间，不等待任何锁
         if (!sharedFrame && slot.sharedMemoryBuffer) {
+            // ✅ 有缓存的 buffer 指针：直接无锁覆盖写入
             sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemoryBuffer);
             writeLockDuration = 0;  // 无锁写入，耗时 0
             // 不需要 unlock，因为没获取锁
@@ -763,15 +764,11 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
             }
             usedLockedWrite = true;  // 标记使用了锁写入
         } else {
-            // ✅ 第一次写入且 lock 失败：尝试重试一次（给读取端一点时间）
-            // 这种情况很少见，但如果发生，等待 1ms 后重试
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(0));
-            if (sharedFrame) {
-                slot.sharedMemoryBuffer = sharedFrame;
-                usedLockedWrite = true;
-                writeLockDuration = 1;  // 重试成功，耗时 1ms
-            }
+            // ✅ 第一次写入且 lock 失败：直接返回失败（不阻塞，不等待，不重试）
+            // Node.js 端会继续推送下一帧，下次写入时应该能成功（因为第一次写入通常能获取锁）
+            // 如果这次写入失败，只是跳过这一帧，不影响后续推送
+            sharedFrame = nullptr;  // 确保为 nullptr，表示写入失败
+            writeLockDuration = 0;  // 无等待，耗时 0
         }
         
         // ✅ 记录共享内存写入日志（所有调用，包括成功和失败）
