@@ -18,8 +18,10 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <mutex>
 #include <thread>
 #include <thread>
 
@@ -45,6 +47,49 @@
 namespace AkVCam
 {
     using RegisterServerFunc = HRESULT (WINAPI *)();
+    
+    // ✅ 自定义日志文件写入函数
+    static void writeFrameReadLog(const std::string &deviceId, 
+                                   long long readDuration, 
+                                   size_t dataSize)
+    {
+        static std::ofstream logFile;
+        static std::mutex logMutex;
+        static bool initialized = false;
+        
+        if (!initialized) {
+            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_Frame_Read_Log.txt
+            std::string logFilePath = tempPath() + "AkVCam_Frame_Read_Log.txt";
+            
+            logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
+            initialized = true;
+        }
+        
+        if (logFile.is_open()) {
+            std::lock_guard<std::mutex> lock(logMutex);
+            
+            // 获取当前时间戳
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()) % 1000;
+            
+            std::tm tm_buf;
+            localtime_s(&tm_buf, &time_t);
+            
+            char timeStr[64];
+            auto msValue = static_cast<long long>(ms.count());
+            std::snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                         tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                         tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
+            
+            logFile << timeStr << " - [FRAME READ] Device: " << deviceId
+                   << " | 读取耗时: " << readDuration << "ms"
+                   << " | 数据大小: " << dataSize << " bytes"
+                   << std::endl;
+            logFile.flush();
+        }
+    }
 
     class Hack
     {
@@ -941,6 +986,9 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
     auto run = slot.run;
 
     if (slot.sharedMemory.isOpen()) {
+        // ✅ 记录驱动读取开始时间
+        auto readStartTime = std::chrono::high_resolution_clock::now();
+        
         auto sharedFrame =
                 reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock());
 
@@ -964,6 +1012,14 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
                 slot.frame = {};
 
             slot.sharedMemory.unlock();
+            
+            // ✅ 记录驱动读取结束时间并计算耗时
+            auto readEndTime = std::chrono::high_resolution_clock::now();
+            auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                readEndTime - readStartTime).count();
+            
+            // ✅ 写入自定义日志文件
+            writeFrameReadLog(deviceId, readDuration, dataSize);
         }
     }
 

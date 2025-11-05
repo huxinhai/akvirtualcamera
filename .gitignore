@@ -126,3 +126,4 @@ release
 ####################################
 *_priv
 *_priv.*
+nodejs_example/*
