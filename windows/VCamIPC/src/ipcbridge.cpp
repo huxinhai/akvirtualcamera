@@ -699,41 +699,191 @@ void AkVCam::IpcBridge::deviceStop(const std::string &deviceId)
     }
 }
 
+// ✅ 日志记录函数：记录 write() 的每一步
+static void writeBridgeWriteLog(const std::string &step, 
+                                  const std::string &info = "",
+                                  long long durationUs = -1)
+{
+    static std::ofstream logFile;
+    static std::mutex logMutex;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        CHAR tempPath[MAX_PATH];
+        GetTempPathA(MAX_PATH, tempPath);
+        std::string logFilePath = std::string(tempPath) + "AkVCam_Bridge_Write_Log.txt";
+        
+        logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
+        initialized = true;
+    }
+    
+    if (logFile.is_open()) {
+        std::lock_guard<std::mutex> lock(logMutex);
+        
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+        
+        std::tm tm_buf;
+        localtime_s(&tm_buf, &time_t);
+        
+        char timeStr[64];
+        auto msValue = static_cast<long long>(ms.count());
+        std::snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
+        
+        logFile << timeStr << " - [BRIDGE WRITE] " << step;
+        if (!info.empty()) {
+            logFile << " | " << info;
+        }
+        if (durationUs >= 0) {
+            if (durationUs < 1000) {
+                logFile << " | 耗时: " << durationUs << "μs";
+            } else {
+                logFile << " | 耗时: " << (durationUs / 1000) << "ms";
+            }
+        }
+        logFile << std::endl;
+        logFile.flush();
+    }
+}
+
 bool AkVCam::IpcBridge::write(const std::string &deviceId,
                               const VideoFrame &frame)
 {
-    AkLogFunction();
+    auto functionStartTime = std::chrono::high_resolution_clock::now();
+    writeBridgeWriteLog("1. 函数开始", "设备: " + deviceId);
 
+    auto lockBroadcastsStartTime = std::chrono::high_resolution_clock::now();
     this->d->m_broadcastsMutex.lock();
+    auto lockBroadcastsEndTime = std::chrono::high_resolution_clock::now();
+    auto lockBroadcastsDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        lockBroadcastsEndTime - lockBroadcastsStartTime).count();
+    writeBridgeWriteLog("2. 获取broadcastsMutex", "", lockBroadcastsDuration);
 
+    auto checkDirectModeStartTime = std::chrono::high_resolution_clock::now();
     if (!this->d->m_directModeStatus.contains(deviceId))
         this->d->m_directModeStatus[deviceId] = {deviceId};
+    auto checkDirectModeEndTime = std::chrono::high_resolution_clock::now();
+    auto checkDirectModeDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkDirectModeEndTime - checkDirectModeStartTime).count();
+    writeBridgeWriteLog("3. 检查directMode", "", checkDirectModeDuration);
 
     if (!this->d->m_directModeStatus[deviceId].isValid(frame.format())) {
+        writeBridgeWriteLog("3. 函数结束", "错误: directMode无效");
         this->d->m_broadcastsMutex.unlock();
-
         return false;
     }
 
-    if (this->d->m_broadcasts.count(deviceId) < 1) {
-        this->d->m_broadcastsMutex.unlock();
+    auto checkBroadcastsStartTime = std::chrono::high_resolution_clock::now();
+    bool deviceExists = this->d->m_broadcasts.count(deviceId) >= 1;
+    auto checkBroadcastsEndTime = std::chrono::high_resolution_clock::now();
+    auto checkBroadcastsDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkBroadcastsEndTime - checkBroadcastsStartTime).count();
+    writeBridgeWriteLog("4. 检查设备是否存在", deviceExists ? "存在" : "不存在", checkBroadcastsDuration);
 
+    if (!deviceExists) {
+        writeBridgeWriteLog("4. 函数结束", "错误: 设备不存在");
+        this->d->m_broadcastsMutex.unlock();
         return false;
     }
 
     auto &slot = this->d->m_broadcasts[deviceId];
 
-    if (slot.type != StreamType_Input) {
-        this->d->m_broadcastsMutex.unlock();
+    auto checkStreamTypeStartTime = std::chrono::high_resolution_clock::now();
+    bool isInputType = (slot.type == StreamType_Input);
+    auto checkStreamTypeEndTime = std::chrono::high_resolution_clock::now();
+    auto checkStreamTypeDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkStreamTypeEndTime - checkStreamTypeStartTime).count();
+    writeBridgeWriteLog("5. 检查流类型", isInputType ? "Input" : "Output", checkStreamTypeDuration);
 
+    if (!isInputType) {
+        writeBridgeWriteLog("5. 函数结束", "错误: 流类型不是Input");
+        this->d->m_broadcastsMutex.unlock();
         return false;
     }
 
-    slot.frameMutex.lock();
+    // ✅ 使用 try_lock() 快速尝试获取锁，不阻塞
+    // 如果获取失败，说明 frameReady() 正在读取，我们直接写入共享内存即可
+    auto tryFrameMutexStartTime = std::chrono::high_resolution_clock::now();
+    bool frameMutexLocked = slot.frameMutex.try_lock();
+    auto tryFrameMutexEndTime = std::chrono::high_resolution_clock::now();
+    auto tryFrameMutexDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        tryFrameMutexEndTime - tryFrameMutexStartTime).count();
+    writeBridgeWriteLog("6. 尝试获取frameMutex", frameMutexLocked ? "成功" : "失败", tryFrameMutexDuration);
+    if (!frameMutexLocked) {
+        // ✅ 无法获取 frameMutex：frameReady() 正在读取
+        // 直接写入共享内存（无锁覆盖），不更新 slot.frame（因为 frameReady() 会从共享内存读取）
+        // 这样不会阻塞，完全由推送方控制频率
+        auto checkSharedMemoryStartTime = std::chrono::high_resolution_clock::now();
+        bool sharedMemoryOpen = slot.sharedMemory.isOpen();
+        bool hasBuffer = (slot.sharedMemoryBuffer != nullptr);
+        auto checkSharedMemoryEndTime = std::chrono::high_resolution_clock::now();
+        auto checkSharedMemoryDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+            checkSharedMemoryEndTime - checkSharedMemoryStartTime).count();
+        writeBridgeWriteLog("7. 检查共享内存", 
+                            "isOpen: " + std::string(sharedMemoryOpen ? "是" : "否") + 
+                            " | hasBuffer: " + std::string(hasBuffer ? "是" : "否"), 
+                            checkSharedMemoryDuration);
+        
+        if (sharedMemoryOpen && hasBuffer) {
+            // ✅ 直接无锁覆盖写入共享内存
+            auto lockFreeWriteStartTime = std::chrono::high_resolution_clock::now();
+            auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemoryBuffer);
+            auto dataSize = std::min(slot.sharedMemory.pageSize()
+                                     - sizeof(SharedFrame)
+                                     + sizeof(void *),
+                                     frame.size());
+            
+            sharedFrame->format = frame.format().format();
+            sharedFrame->width = frame.format().width();
+            sharedFrame->height = frame.format().height();
+            
+            if (dataSize > 0)
+                memcpy(sharedFrame->data, frame.constData(), dataSize);
+            
+            auto lockFreeWriteEndTime = std::chrono::high_resolution_clock::now();
+            auto lockFreeWriteDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                lockFreeWriteEndTime - lockFreeWriteStartTime).count();
+            writeBridgeWriteLog("8. 无锁覆盖写入", "数据大小: " + std::to_string(dataSize) + " bytes", lockFreeWriteDuration);
+            
+            // ✅ 记录日志
+            writeSharedMemoryWriteLog(deviceId, 0, true, dataSize);
+            
+            auto unlockBroadcastsStartTime = std::chrono::high_resolution_clock::now();
+            this->d->m_broadcastsMutex.unlock();
+            auto unlockBroadcastsEndTime = std::chrono::high_resolution_clock::now();
+            auto unlockBroadcastsDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                unlockBroadcastsEndTime - unlockBroadcastsStartTime).count();
+            writeBridgeWriteLog("9. 释放broadcastsMutex", "", unlockBroadcastsDuration);
+            
+            auto functionEndTime = std::chrono::high_resolution_clock::now();
+            auto functionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                functionEndTime - functionStartTime).count();
+            writeBridgeWriteLog("10. 函数结束(无锁路径)", "总耗时: " + std::to_string(functionDuration) + "ms | 返回: true");
+            
+            return true;  // ✅ 成功写入（无锁），直接返回
+        } else {
+            // ✅ 共享内存未初始化或 buffer 未缓存，无法写入
+            writeBridgeWriteLog("7. 函数结束", "错误: 共享内存未打开或buffer未缓存");
+            this->d->m_broadcastsMutex.unlock();
+            return false;
+        }
+    }
 
-    if (slot.sharedMemory.isOpen()) {
+    auto checkSharedMemoryOpenStartTime = std::chrono::high_resolution_clock::now();
+    bool sharedMemoryIsOpen = slot.sharedMemory.isOpen();
+    auto checkSharedMemoryOpenEndTime = std::chrono::high_resolution_clock::now();
+    auto checkSharedMemoryOpenDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        checkSharedMemoryOpenEndTime - checkSharedMemoryOpenStartTime).count();
+    writeBridgeWriteLog("7. 检查共享内存是否打开", sharedMemoryIsOpen ? "是" : "否", checkSharedMemoryOpenDuration);
+    
+    if (sharedMemoryIsOpen) {
         // ✅ 记录写入端等待 mutex 的时间
         auto writeLockStartTime = std::chrono::high_resolution_clock::now();
+        writeBridgeWriteLog("8. 开始尝试获取sharedMemory锁", "timeout=0");
         
         // ✅ 尝试立即获取锁（timeout=0，不等待）
         // 如果成功，正常写入；如果失败，直接覆盖（推送方负责时间控制）
@@ -742,25 +892,39 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
         auto writeLockEndTime = std::chrono::high_resolution_clock::now();
         auto writeLockDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
             writeLockEndTime - writeLockStartTime).count();
+        writeBridgeWriteLog("9. 尝试获取sharedMemory锁完成", 
+                            sharedFrame ? "成功" : "失败", 
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                writeLockEndTime - writeLockStartTime).count());
         
         // ✅ 计算数据大小（用于日志）
+        auto calcDataSizeStartTime = std::chrono::high_resolution_clock::now();
         auto dataSize = std::min(slot.sharedMemory.pageSize()
                                  - sizeof(SharedFrame)
                                  + sizeof(void *),
                                  frame.size());
+        auto calcDataSizeEndTime = std::chrono::high_resolution_clock::now();
+        auto calcDataSizeDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+            calcDataSizeEndTime - calcDataSizeStartTime).count();
+        writeBridgeWriteLog("10. 计算数据大小", "大小: " + std::to_string(dataSize) + " bytes", calcDataSizeDuration);
         
         bool usedLockedWrite = false;  // 标记是否使用了锁写入
         
         // ✅ 完全无锁写入：推送方完全控制时间，不等待任何锁
+        auto decideWriteModeStartTime = std::chrono::high_resolution_clock::now();
         if (!sharedFrame && slot.sharedMemoryBuffer) {
             // ✅ 有缓存的 buffer 指针：直接无锁覆盖写入
             sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemoryBuffer);
             writeLockDuration = 0;  // 无锁写入，耗时 0
+            writeBridgeWriteLog("11. 决定写入模式", "无锁覆盖写入");
             // 不需要 unlock，因为没获取锁
         } else if (sharedFrame) {
             // ✅ 成功获取锁：第一次时保存 buffer 指针供后续无锁写入使用
             if (!slot.sharedMemoryBuffer) {
                 slot.sharedMemoryBuffer = sharedFrame;
+                writeBridgeWriteLog("11. 决定写入模式", "加锁写入(首次，保存buffer)");
+            } else {
+                writeBridgeWriteLog("11. 决定写入模式", "加锁写入");
             }
             usedLockedWrite = true;  // 标记使用了锁写入
         } else {
@@ -769,7 +933,12 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
             // 如果这次写入失败，只是跳过这一帧，不影响后续推送
             sharedFrame = nullptr;  // 确保为 nullptr，表示写入失败
             writeLockDuration = 0;  // 无等待，耗时 0
+            writeBridgeWriteLog("11. 决定写入模式", "失败: 无buffer且无法获取锁");
         }
+        auto decideWriteModeEndTime = std::chrono::high_resolution_clock::now();
+        auto decideWriteModeDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+            decideWriteModeEndTime - decideWriteModeStartTime).count();
+        writeBridgeWriteLog("11. 决定写入模式完成", "", decideWriteModeDuration);
         
         // ✅ 记录共享内存写入日志（所有调用，包括成功和失败）
         writeSharedMemoryWriteLog(deviceId, writeLockDuration, sharedFrame != nullptr, dataSize);
@@ -784,20 +953,33 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
 
         if (sharedFrame) {
             // ✅ 直接覆盖写入（推送方负责时间控制，显示最新帧）
+            auto writeToSharedMemoryStartTime = std::chrono::high_resolution_clock::now();
             sharedFrame->format = frame.format().format();
             sharedFrame->width = frame.format().width();
             sharedFrame->height = frame.format().height();
 
             if (dataSize > 0)
                 memcpy(sharedFrame->data, frame.constData(), dataSize);
+            auto writeToSharedMemoryEndTime = std::chrono::high_resolution_clock::now();
+            auto writeToSharedMemoryDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                writeToSharedMemoryEndTime - writeToSharedMemoryStartTime).count();
+            writeBridgeWriteLog("12. 写入共享内存", "", writeToSharedMemoryDuration);
 
             // ✅ 如果使用了锁写入，需要释放锁
+            auto unlockSharedMemoryStartTime = std::chrono::high_resolution_clock::now();
             if (usedLockedWrite) {
                 slot.sharedMemory.unlock();
+            }
+            auto unlockSharedMemoryEndTime = std::chrono::high_resolution_clock::now();
+            auto unlockSharedMemoryDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                unlockSharedMemoryEndTime - unlockSharedMemoryStartTime).count();
+            if (usedLockedWrite) {
+                writeBridgeWriteLog("13. 释放sharedMemory锁", "", unlockSharedMemoryDuration);
             }
             
             // ✅ 立即更新 slot.frame，确保 frameReady 能读取到最新帧
             // 这样即使 frameReady 延迟触发，也能读取到最新写入的帧
+            auto updateSlotFrameStartTime = std::chrono::high_resolution_clock::now();
             VideoFormat format(sharedFrame->format, sharedFrame->width, sharedFrame->height);
             if (!format.isSameFormat(slot.frame.format())) {
                 slot.frame = VideoFrame(format);
@@ -806,24 +988,56 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
                 auto copySize = std::min(dataSize, slot.frame.size());
                 memcpy(slot.frame.data(), sharedFrame->data, copySize);
             }
+            auto updateSlotFrameEndTime = std::chrono::high_resolution_clock::now();
+            auto updateSlotFrameDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                updateSlotFrameEndTime - updateSlotFrameStartTime).count();
+            writeBridgeWriteLog("14. 更新slot.frame", "", updateSlotFrameDuration);
             
+            auto notifyStartTime = std::chrono::high_resolution_clock::now();
             slot.available = true;
             slot.frameAvailable.notify_all();
+            auto notifyEndTime = std::chrono::high_resolution_clock::now();
+            auto notifyDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+                notifyEndTime - notifyStartTime).count();
+            writeBridgeWriteLog("15. 通知frameAvailable", "", notifyDuration);
         } else {
             // ✅ 无法写入（共享内存未初始化）
-            slot.frameMutex.unlock();
+            if (frameMutexLocked) {
+                slot.frameMutex.unlock();
+            }
             this->d->m_broadcastsMutex.unlock();
             return false;
         }
     } else {
+        // ✅ 共享内存未打开，使用内部 frame 存储
         slot.frame = frame;
         slot.available = true;
         slot.frameAvailable.notify_all();
     }
 
-    slot.frameMutex.unlock();
+    // ✅ 释放 frameMutex（如果之前成功获取）
+    auto unlockFrameMutexStartTime = std::chrono::high_resolution_clock::now();
+    if (frameMutexLocked) {
+        slot.frameMutex.unlock();
+    }
+    auto unlockFrameMutexEndTime = std::chrono::high_resolution_clock::now();
+    auto unlockFrameMutexDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        unlockFrameMutexEndTime - unlockFrameMutexStartTime).count();
+    if (frameMutexLocked) {
+        writeBridgeWriteLog("16. 释放frameMutex", "", unlockFrameMutexDuration);
+    }
 
+    auto unlockBroadcastsFinalStartTime = std::chrono::high_resolution_clock::now();
     this->d->m_broadcastsMutex.unlock();
+    auto unlockBroadcastsFinalEndTime = std::chrono::high_resolution_clock::now();
+    auto unlockBroadcastsFinalDuration = std::chrono::duration_cast<std::chrono::microseconds>(
+        unlockBroadcastsFinalEndTime - unlockBroadcastsFinalStartTime).count();
+    writeBridgeWriteLog("17. 释放broadcastsMutex(最终)", "", unlockBroadcastsFinalDuration);
+
+    auto functionEndTime = std::chrono::high_resolution_clock::now();
+    auto functionDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        functionEndTime - functionStartTime).count();
+    writeBridgeWriteLog("18. 函数结束", "总耗时: " + std::to_string(functionDuration) + "ms | 返回: true");
 
     return true;
 }
