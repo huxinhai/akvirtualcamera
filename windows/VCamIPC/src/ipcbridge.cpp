@@ -1288,6 +1288,7 @@ bool AkVCam::IpcBridgePrivate::frameRequired(const std::string &deviceId,
 {
     AkLogFunction();
 
+    // ✅ 快速获取和释放 broadcastsMutex，只用于检查设备是否存在和获取 slot 引用
     this->m_broadcastsMutex.lock();
 
     if (this->m_broadcasts.count(deviceId) < 1) {
@@ -1297,7 +1298,13 @@ bool AkVCam::IpcBridgePrivate::frameRequired(const std::string &deviceId,
     }
 
     auto &slot = this->m_broadcasts[deviceId];
+    bool run = slot.run;
+    
+    // ✅ 立即释放 broadcastsMutex，避免阻塞 write() 函数
+    // 后续的 frameMutex 操作不需要 broadcastsMutex 保护
+    this->m_broadcastsMutex.unlock();
 
+    // ✅ 在释放 broadcastsMutex 后，再获取 frameMutex 并等待
     std::unique_lock<std::mutex> lock(slot.frameMutex);
 
     if (!slot.available)
@@ -1305,12 +1312,10 @@ bool AkVCam::IpcBridgePrivate::frameRequired(const std::string &deviceId,
                                      std::chrono::seconds(1));
 
     auto &frame = slot.frame;
-    auto run = slot.run;
     slot.available = false;
     lock.unlock();
 
     message = MsgBroadcast(deviceId, currentPid(), frame).toMessage();
-    this->m_broadcastsMutex.unlock();
 
     return run;
 }
