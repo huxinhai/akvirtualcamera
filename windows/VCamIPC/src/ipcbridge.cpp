@@ -49,7 +49,7 @@ namespace AkVCam
 {
     using RegisterServerFunc = HRESULT (WINAPI *)();
     
-    // ✅ 自定义日志文件写入函数
+    // ✅ 自定义日志文件写入函数（驱动读取）
     static void writeFrameReadLog(const std::string &deviceId, 
                                    long long readDuration, 
                                    size_t dataSize)
@@ -98,6 +98,63 @@ namespace AkVCam
             logFile << timeStr << " - [FRAME READ] Device: " << deviceId
                    << " | 读取耗时: " << readDuration << "ms"
                    << " | 距上次读取: " << intervalMs << "ms"
+                   << " | 数据大小: " << dataSize << " bytes"
+                   << std::endl;
+            logFile.flush();
+        }
+    }
+    
+    // ✅ 自定义日志文件写入函数（共享内存写入）
+    static void writeSharedMemoryWriteLog(const std::string &deviceId,
+                                          long long lockDuration,
+                                          bool success,
+                                          size_t dataSize)
+    {
+        static std::ofstream logFile;
+        static std::mutex logMutex;
+        static bool initialized = false;
+        static std::map<std::string, std::chrono::high_resolution_clock::time_point> lastWriteTime;
+        
+        if (!initialized) {
+            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_SharedMemory_Write_Log.txt
+            std::string logFilePath = tempPath() + "AkVCam_SharedMemory_Write_Log.txt";
+            
+            logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
+            initialized = true;
+        }
+        
+        if (logFile.is_open()) {
+            std::lock_guard<std::mutex> lock(logMutex);
+            
+            // 获取当前时间戳
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()) % 1000;
+            
+            std::tm tm_buf;
+            localtime_s(&tm_buf, &time_t);
+            
+            char timeStr[64];
+            auto msValue = static_cast<long long>(ms.count());
+            std::snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                         tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                         tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
+            
+            // 计算距上次写入的间隔
+            auto nowHighRes = std::chrono::high_resolution_clock::now();
+            long long intervalMs = 0;
+            if (lastWriteTime.find(deviceId) != lastWriteTime.end()) {
+                auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nowHighRes - lastWriteTime[deviceId]);
+                intervalMs = interval.count();
+            }
+            lastWriteTime[deviceId] = nowHighRes;
+            
+            logFile << timeStr << " - [SHARED MEMORY WRITE] Device: " << deviceId
+                   << " | 等待 mutex 耗时: " << lockDuration << "ms"
+                   << " | 结果: " << (success ? "成功" : "超时/失败")
+                   << " | 距上次写入: " << intervalMs << "ms"
                    << " | 数据大小: " << dataSize << " bytes"
                    << std::endl;
             logFile.flush();
@@ -677,16 +734,29 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
         // ✅ 记录写入端等待 mutex 的时间
         auto writeLockStartTime = std::chrono::high_resolution_clock::now();
         
-        auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock());
+        // ✅ 使用短超时（10ms）避免长时间阻塞
+        // 如果驱动读取慢，超时就跳过这一帧（因为共享内存是单缓冲的）
+        // 这样可以避免 Node.js 推送阻塞 ~1000ms
+        auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(10));
         
         auto writeLockEndTime = std::chrono::high_resolution_clock::now();
         auto writeLockDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
             writeLockEndTime - writeLockStartTime).count();
         
-        // 如果等待时间较长，记录日志
-        if (writeLockDuration > 10) {
+        // ✅ 计算数据大小（用于日志）
+        auto dataSize = std::min(slot.sharedMemory.pageSize()
+                                 - sizeof(SharedFrame)
+                                 + sizeof(void *),
+                                 frame.size());
+        
+        // ✅ 记录共享内存写入日志（所有调用，包括成功和失败）
+        writeSharedMemoryWriteLog(deviceId, writeLockDuration, sharedFrame != nullptr, dataSize);
+        
+        // 如果等待时间较长或超时，记录框架日志
+        if (writeLockDuration > 5 || !sharedFrame) {
             AkLogInfo() << "[FRAME WRITE] Device: " << deviceId
                        << " | 等待 mutex 耗时: " << writeLockDuration << "ms"
+                       << " | 结果: " << (sharedFrame ? "成功" : "超时/失败，跳过此帧")
                        << std::endl;
         }
 
@@ -694,11 +764,6 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
             sharedFrame->format = frame.format().format();
             sharedFrame->width = frame.format().width();
             sharedFrame->height = frame.format().height();
-            auto dataSize =
-                    std::min(slot.sharedMemory.pageSize()
-                             - sizeof(SharedFrame)
-                             + sizeof(void *),
-                             frame.size());
 
             if (dataSize > 0)
                 memcpy(sharedFrame->data, frame.constData(), dataSize);
@@ -706,6 +771,12 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
             slot.sharedMemory.unlock();
             slot.available = true;
             slot.frameAvailable.notify_all();
+        } else {
+            // ✅ 超时：无法获取 mutex，跳过这一帧
+            // 返回 false 表示写入失败（因为共享内存是单缓冲的，无法覆盖）
+            slot.frameMutex.unlock();
+            this->d->m_broadcastsMutex.unlock();
+            return false;
         }
     } else {
         slot.frame = frame;
