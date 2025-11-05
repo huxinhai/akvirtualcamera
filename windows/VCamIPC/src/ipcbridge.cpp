@@ -190,6 +190,7 @@ namespace AkVCam
         std::condition_variable_any frameAvailable;
         std::mutex frameMutex;
         SharedMemory sharedMemory;
+        void *sharedMemoryBuffer {nullptr};  // ✅ 保存 buffer 指针，用于无锁覆盖写入
         bool available {false};
         bool run {false};
 
@@ -734,10 +735,9 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
         // ✅ 记录写入端等待 mutex 的时间
         auto writeLockStartTime = std::chrono::high_resolution_clock::now();
         
-        // ✅ 使用短超时（10ms）避免长时间阻塞
-        // 如果驱动读取慢，超时就跳过这一帧（因为共享内存是单缓冲的）
-        // 这样可以避免 Node.js 推送阻塞 ~1000ms
-        auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(10));
+        // ✅ 尝试立即获取锁（timeout=0，不等待）
+        // 如果成功，正常写入；如果失败，直接覆盖（推送方负责时间控制）
+        auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(0));
         
         auto writeLockEndTime = std::chrono::high_resolution_clock::now();
         auto writeLockDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -749,6 +749,31 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
                                  + sizeof(void *),
                                  frame.size());
         
+        bool usedLockedWrite = false;  // 标记是否使用了锁写入
+        
+        // ✅ 如果 lock 失败，使用保存的 buffer 指针直接覆盖（无锁写入）
+        if (!sharedFrame && slot.sharedMemoryBuffer) {
+            sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemoryBuffer);
+            writeLockDuration = 0;  // 无锁写入，耗时 0
+            // 不需要 unlock，因为没获取锁
+        } else if (sharedFrame) {
+            // ✅ 成功获取锁：第一次时保存 buffer 指针供后续无锁写入使用
+            if (!slot.sharedMemoryBuffer) {
+                slot.sharedMemoryBuffer = sharedFrame;
+            }
+            usedLockedWrite = true;  // 标记使用了锁写入
+        } else {
+            // ✅ 第一次写入且 lock 失败：尝试重试一次（给读取端一点时间）
+            // 这种情况很少见，但如果发生，等待 1ms 后重试
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(0));
+            if (sharedFrame) {
+                slot.sharedMemoryBuffer = sharedFrame;
+                usedLockedWrite = true;
+                writeLockDuration = 1;  // 重试成功，耗时 1ms
+            }
+        }
+        
         // ✅ 记录共享内存写入日志（所有调用，包括成功和失败）
         writeSharedMemoryWriteLog(deviceId, writeLockDuration, sharedFrame != nullptr, dataSize);
         
@@ -756,11 +781,12 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
         if (writeLockDuration > 5 || !sharedFrame) {
             AkLogInfo() << "[FRAME WRITE] Device: " << deviceId
                        << " | 等待 mutex 耗时: " << writeLockDuration << "ms"
-                       << " | 结果: " << (sharedFrame ? "成功" : "超时/失败，跳过此帧")
+                       << " | 结果: " << (sharedFrame ? (usedLockedWrite ? "加锁写入" : "无锁覆盖") : "失败")
                        << std::endl;
         }
 
         if (sharedFrame) {
+            // ✅ 直接覆盖写入（推送方负责时间控制，显示最新帧）
             sharedFrame->format = frame.format().format();
             sharedFrame->width = frame.format().width();
             sharedFrame->height = frame.format().height();
@@ -768,12 +794,26 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
             if (dataSize > 0)
                 memcpy(sharedFrame->data, frame.constData(), dataSize);
 
-            slot.sharedMemory.unlock();
+            // ✅ 如果使用了锁写入，需要释放锁
+            if (usedLockedWrite) {
+                slot.sharedMemory.unlock();
+            }
+            
+            // ✅ 立即更新 slot.frame，确保 frameReady 能读取到最新帧
+            // 这样即使 frameReady 延迟触发，也能读取到最新写入的帧
+            VideoFormat format(sharedFrame->format, sharedFrame->width, sharedFrame->height);
+            if (!format.isSameFormat(slot.frame.format())) {
+                slot.frame = VideoFrame(format);
+            }
+            if (dataSize > 0 && slot.frame.size() > 0) {
+                auto copySize = std::min(dataSize, slot.frame.size());
+                memcpy(slot.frame.data(), sharedFrame->data, copySize);
+            }
+            
             slot.available = true;
             slot.frameAvailable.notify_all();
         } else {
-            // ✅ 超时：无法获取 mutex，跳过这一帧
-            // 返回 false 表示写入失败（因为共享内存是单缓冲的，无法覆盖）
+            // ✅ 无法写入（共享内存未初始化）
             slot.frameMutex.unlock();
             this->d->m_broadcastsMutex.unlock();
             return false;
@@ -1087,10 +1127,14 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
         // ✅ 记录驱动读取开始时间
         auto readStartTime = std::chrono::high_resolution_clock::now();
         
+        // ✅ 使用短超时（10ms）避免长时间阻塞，如果写入端正在无锁写入
         auto sharedFrame =
-                reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock());
+                reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock(10));
 
         if (sharedFrame) {
+            // ✅ 使用 frameMutex 保护 slot.frame 的更新，避免与 write() 竞争
+            slot.frameMutex.lock();
+            
             VideoFormat format(sharedFrame->format,
                                sharedFrame->width,
                                sharedFrame->height);
@@ -1109,6 +1153,7 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
             else
                 slot.frame = {};
 
+            slot.frameMutex.unlock();
             slot.sharedMemory.unlock();
             
             // ✅ 记录驱动读取结束时间并计算耗时
@@ -1118,6 +1163,16 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
             
             // ✅ 写入自定义日志文件
             writeFrameReadLog(deviceId, readDuration, dataSize);
+        } else {
+            // ✅ 读取超时：可能写入端正在无锁写入，使用最新的 slot.frame（已在 write() 中更新）
+            // 记录日志但不更新 slot.frame（因为 write() 已经更新了）
+            auto readEndTime = std::chrono::high_resolution_clock::now();
+            auto readDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                readEndTime - readStartTime).count();
+            
+            if (readDuration >= 10) {
+                writeFrameReadLog(deviceId, readDuration, 0);
+            }
         }
     }
 
