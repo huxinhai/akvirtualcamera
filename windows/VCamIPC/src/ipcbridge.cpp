@@ -1321,6 +1321,7 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
 
     MsgFrameReady msgFrameReady(message);
 
+    // ✅ 快速获取和释放 broadcastsMutex，只用于检查设备是否存在和获取 slot 引用
     this->m_broadcastsMutex.lock();
 
     auto deviceId = msgFrameReady.device();
@@ -1333,8 +1334,13 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
 
     auto &slot = this->m_broadcasts[deviceId];
     auto run = slot.run;
+    bool sharedMemoryOpen = slot.sharedMemory.isOpen();
+    
+    // ✅ 立即释放 broadcastsMutex，避免阻塞 write() 函数
+    // 后续的共享内存操作不需要 broadcastsMutex 保护
+    this->m_broadcastsMutex.unlock();
 
-    if (slot.sharedMemory.isOpen()) {
+    if (sharedMemoryOpen) {
         // ✅ 记录驱动读取开始时间
         auto readStartTime = std::chrono::high_resolution_clock::now();
         
@@ -1387,9 +1393,9 @@ bool AkVCam::IpcBridgePrivate::frameReady(const Message &message)
         }
     }
 
-    this->m_broadcastsMutex.unlock();
+    // ✅ broadcastsMutex 已经在上面释放了，不需要再次释放
 
-    if (slot.sharedMemory.isOpen())
+    if (sharedMemoryOpen)
         AKVCAM_EMIT(this->self,
                     FrameReady,
                     deviceId,
