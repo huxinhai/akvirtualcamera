@@ -602,14 +602,18 @@
  
      AkLogInfo() << "Connection accepted by input pin" << std::endl;
  
-     // Define memory allocator requirements.
-     ALLOCATOR_PROPERTIES allocatorRequirements;
-     memset(&allocatorRequirements, 0, sizeof(ALLOCATOR_PROPERTIES));
-     memInputPin->GetAllocatorRequirements(&allocatorRequirements);
-     auto videoFormat = formatFromMediaType(mediaType);
- 
-     if (allocatorRequirements.cBuffers < 1)
-         allocatorRequirements.cBuffers = 1;
+    // Define memory allocator requirements.
+    ALLOCATOR_PROPERTIES allocatorRequirements;
+    memset(&allocatorRequirements, 0, sizeof(ALLOCATOR_PROPERTIES));
+    memInputPin->GetAllocatorRequirements(&allocatorRequirements);
+    auto videoFormat = formatFromMediaType(mediaType);
+
+    // ✅ 增加最小缓冲区数量，减少 GetBuffer() 阻塞
+    // 原来的逻辑：如果 < 1，设置为 1（太少，导致阻塞）
+    // 新逻辑：如果 < 3，设置为 3（提供足够的缓冲空间）
+    // 这样可以避免下游应用读取慢时，GetBuffer() 长时间阻塞
+    if (allocatorRequirements.cBuffers < 5)
+        allocatorRequirements.cBuffers = 5;
  
      allocatorRequirements.cbBuffer = LONG(videoFormat.dataSize());
  
