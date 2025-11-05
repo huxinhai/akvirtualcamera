@@ -25,10 +25,11 @@
  #include <random>
  #include <sstream>
  #include <thread>
- #include <fstream>
- #include <chrono>
- #include <iomanip>
- #include <dshow.h>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <map>
+#include <dshow.h>
  
  #include "pin.h"
  #include "basefilter.h"
@@ -48,9 +49,67 @@
  #include "VCamUtils/src/videoformatspec.h"
  #include "VCamUtils/src/utils.h"
  
- namespace AkVCam
- {
-     class PinPrivate
+namespace AkVCam
+{
+    // ✅ 自定义日志文件写入函数：记录 GetBuffer 阻塞耗时
+    static void writeGetBufferBlockLog(long long blockDuration, 
+                                       const std::string &status)
+    {
+        static std::ofstream logFile;
+        static std::mutex logMutex;
+        static bool initialized = false;
+        static bool firstCall = true;
+        static std::chrono::high_resolution_clock::time_point lastCallTime;
+        
+        if (!initialized) {
+            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_GetBuffer_Block_Log.txt
+            CHAR tempPath[MAX_PATH];
+            GetTempPathA(MAX_PATH, tempPath);
+            std::string logFilePath = std::string(tempPath) + "AkVCam_GetBuffer_Block_Log.txt";
+            
+            logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
+            initialized = true;
+        }
+        
+        if (logFile.is_open()) {
+            std::lock_guard<std::mutex> lock(logMutex);
+            
+            // 获取当前时间戳
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()) % 1000;
+            
+            std::tm tm_buf;
+            localtime_s(&tm_buf, &time_t);
+            
+            char timeStr[64];
+            auto msValue = static_cast<long long>(ms.count());
+            std::snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02d %02d:%02d:%02d.%03lld",
+                         tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                         tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
+            
+            // 计算距上次调用的间隔
+            auto nowHighRes = std::chrono::high_resolution_clock::now();
+            long long intervalMs = 0;
+            if (!firstCall) {
+                auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nowHighRes - lastCallTime);
+                intervalMs = interval.count();
+            }
+            lastCallTime = nowHighRes;
+            firstCall = false;
+            
+            logFile << timeStr << " - [GET BUFFER] "
+                   << "阻塞耗时: " << blockDuration << "ms"
+                   << " | 距上次调用: " << intervalMs << "ms"
+                   << " | 状态: " << status
+                   << std::endl;
+            logFile.flush();
+        }
+    }
+
+    class PinPrivate
      {
          public:
              Pin *self;
@@ -610,8 +669,9 @@
 
     // ✅ 增加最小缓冲区数量，减少 GetBuffer() 阻塞
     // 原来的逻辑：如果 < 1，设置为 1（太少，导致阻塞）
-    // 新逻辑：如果 < 3，设置为 3（提供足够的缓冲空间）
+    // 新逻辑：如果 < 5，设置为 5（提供足够的缓冲空间）
     // 这样可以避免下游应用读取慢时，GetBuffer() 长时间阻塞
+    // 5个缓冲区 = 5 * 614400 字节 ≈ 3 MB（完全可以接受）
     if (allocatorRequirements.cBuffers < 5)
         allocatorRequirements.cBuffers = 5;
  
@@ -940,6 +1000,8 @@ HRESULT AkVCam::PinPrivate::sendFrame()
         
         if (getBufferDuration > 10) {
             AkLogInfo() << "[SEND FRAME] GetBuffer 阻塞耗时: " << getBufferDuration << "ms (获取缓冲区失败)" << std::endl;
+            // ✅ 写入自定义日志文件
+            writeGetBufferBlockLog(getBufferDuration, "获取缓冲区失败");
         }
         
         return E_FAIL;
@@ -949,10 +1011,12 @@ HRESULT AkVCam::PinPrivate::sendFrame()
     auto getBufferDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
         getBufferEndTime - getBufferStartTime).count();
     
-    // 如果 GetBuffer 阻塞时间较长，记录日志
+    // ✅ 记录 GetBuffer 阻塞时间（无论是否 > 10ms，都写入日志文件以便全面分析）
     if (getBufferDuration > 10) {
         AkLogInfo() << "[SEND FRAME] GetBuffer 阻塞耗时: " << getBufferDuration << "ms (等待应用程序读取)" << std::endl;
     }
+    // ✅ 写入自定义日志文件（记录所有调用，包括阻塞时间短的情况）
+    writeGetBufferBlockLog(getBufferDuration, "等待应用程序读取");
  
      BYTE *pData = nullptr;
      LONG size = sample->GetSize();
