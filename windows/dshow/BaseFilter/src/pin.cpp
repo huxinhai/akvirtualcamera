@@ -313,8 +313,20 @@
  void AkVCam::Pin::frameReady(const VideoFrame &frame, bool isActive)
  {
      AkLogFunction();
+     
+     // ✅ 记录 frameReady 触发时间（用于分析调用频率）
+     static auto lastFrameReadyTime = std::chrono::high_resolution_clock::now();
+     auto now = std::chrono::high_resolution_clock::now();
+     auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+         now - lastFrameReadyTime).count();
+     lastFrameReadyTime = now;
+     
+     if (interval > 100) {  // 如果间隔 > 100ms，记录日志
+         AkLogInfo() << "[FRAME READY] 触发间隔: " << interval << "ms | isActive: " << isActive << std::endl;
+     }
+     
      AkLogInfo() << "Running: " << this->d->m_running << std::endl;
- 
+
      if (!this->d->m_running)
          return;
  
@@ -905,17 +917,38 @@
                  << std::endl;
  }
  
- HRESULT AkVCam::PinPrivate::sendFrame()
- {
-     AkLogFunction();
-     IMediaSample *sample = nullptr;
- 
-     if (FAILED(this->m_memAllocator->GetBuffer(&sample,
-                                                nullptr,
-                                                nullptr,
-                                                0))
-         || !sample)
-         return E_FAIL;
+HRESULT AkVCam::PinPrivate::sendFrame()
+{
+    AkLogFunction();
+    IMediaSample *sample = nullptr;
+
+    // ✅ 记录 GetBuffer 阻塞时间（这是驱动读取慢的关键点）
+    auto getBufferStartTime = std::chrono::high_resolution_clock::now();
+    
+    if (FAILED(this->m_memAllocator->GetBuffer(&sample,
+                                               nullptr,
+                                               nullptr,
+                                               0))
+        || !sample) {
+        auto getBufferEndTime = std::chrono::high_resolution_clock::now();
+        auto getBufferDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            getBufferEndTime - getBufferStartTime).count();
+        
+        if (getBufferDuration > 10) {
+            AkLogInfo() << "[SEND FRAME] GetBuffer 阻塞耗时: " << getBufferDuration << "ms (获取缓冲区失败)" << std::endl;
+        }
+        
+        return E_FAIL;
+    }
+    
+    auto getBufferEndTime = std::chrono::high_resolution_clock::now();
+    auto getBufferDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        getBufferEndTime - getBufferStartTime).count();
+    
+    // 如果 GetBuffer 阻塞时间较长，记录日志
+    if (getBufferDuration > 10) {
+        AkLogInfo() << "[SEND FRAME] GetBuffer 阻塞耗时: " << getBufferDuration << "ms (等待应用程序读取)" << std::endl;
+    }
  
      BYTE *pData = nullptr;
      LONG size = sample->GetSize();

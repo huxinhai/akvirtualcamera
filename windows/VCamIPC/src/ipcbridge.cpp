@@ -21,6 +21,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <thread>
@@ -56,6 +57,7 @@ namespace AkVCam
         static std::ofstream logFile;
         static std::mutex logMutex;
         static bool initialized = false;
+        static std::map<std::string, std::chrono::high_resolution_clock::time_point> lastReadTime;
         
         if (!initialized) {
             // 自定义日志文件路径：Windows 临时目录下的 AkVCam_Frame_Read_Log.txt
@@ -83,8 +85,19 @@ namespace AkVCam
                          tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
                          tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, msValue);
             
+            // 计算距上次读取的间隔
+            auto nowHighRes = std::chrono::high_resolution_clock::now();
+            long long intervalMs = 0;
+            if (lastReadTime.find(deviceId) != lastReadTime.end()) {
+                auto interval = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    nowHighRes - lastReadTime[deviceId]);
+                intervalMs = interval.count();
+            }
+            lastReadTime[deviceId] = nowHighRes;
+            
             logFile << timeStr << " - [FRAME READ] Device: " << deviceId
                    << " | 读取耗时: " << readDuration << "ms"
+                   << " | 距上次读取: " << intervalMs << "ms"
                    << " | 数据大小: " << dataSize << " bytes"
                    << std::endl;
             logFile.flush();
@@ -661,7 +674,21 @@ bool AkVCam::IpcBridge::write(const std::string &deviceId,
     slot.frameMutex.lock();
 
     if (slot.sharedMemory.isOpen()) {
+        // ✅ 记录写入端等待 mutex 的时间
+        auto writeLockStartTime = std::chrono::high_resolution_clock::now();
+        
         auto sharedFrame = reinterpret_cast<SharedFrame *>(slot.sharedMemory.lock());
+        
+        auto writeLockEndTime = std::chrono::high_resolution_clock::now();
+        auto writeLockDuration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            writeLockEndTime - writeLockStartTime).count();
+        
+        // 如果等待时间较长，记录日志
+        if (writeLockDuration > 10) {
+            AkLogInfo() << "[FRAME WRITE] Device: " << deviceId
+                       << " | 等待 mutex 耗时: " << writeLockDuration << "ms"
+                       << std::endl;
+        }
 
         if (sharedFrame) {
             sharedFrame->format = frame.format().format();
