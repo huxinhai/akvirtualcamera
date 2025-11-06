@@ -48,13 +48,13 @@ add_definitions(-DCOMMONS_APPNAME="${COMMONS_APPNAME}"
                 -DCOMMONS_VERSION="${VERSION}"
                 -DPREFIX="${PREFIX}")
 
-set(AKVCAM_PLUGIN_NAME AkVirtualCamera)
+set(AKVCAM_PLUGIN_NAME InterviewDogVirtualCamera)
 set(AKVCAM_PLUGIN_MF_NAME "${AKVCAM_PLUGIN_NAME}MF")
-set(AKVCAM_SERVICE_NAME AkVCamAssistant)
+set(AKVCAM_SERVICE_NAME InterviewDogAssistant)
 set(AKVCAM_SERVICE_MF_NAME "${AKVCAM_SERVICE_NAME}MF")
-set(AKVCAM_MANAGER_NAME AkVCamManager)
-set(AKVCAM_BRIDGE_NAME AkVCamBridge)
-set(AKVCAM_DEVICE_PREFIX AkVCamVideoDevice)
+set(AKVCAM_MANAGER_NAME InterviewDogManager)
+set(AKVCAM_BRIDGE_NAME InterviewDogBridge)
+set(AKVCAM_DEVICE_PREFIX InterviewDogVideoDevice)
 set(AKVCAM_SERVICEPORT "8226" CACHE STRING "Virtual camera service port")
 
 add_definitions(-DAKVCAM_PLUGIN_NAME="${AKVCAM_PLUGIN_NAME}"

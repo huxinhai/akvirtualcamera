@@ -32,7 +32,7 @@
  */
 
 // We'll assume this is a valid akvcam output device.
-#define VIDEO_OUTPUT "AkVCamVideoDevice0"
+#define VIDEO_OUTPUT "InterviewDogVideoDevice0"
 
 // Send frames for about 30 seconds in a 30 FPS stream.
 #define FPS 30

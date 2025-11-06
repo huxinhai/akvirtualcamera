@@ -20,6 +20,8 @@
 #include <map>
 #include <sstream>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <CoreGraphics/CGImage.h>
@@ -456,9 +458,25 @@ bool AkVCam::isDeviceIdTaken(const std::string &deviceId)
                      deviceId) != cameraIds.end();
 }
 
+// 获取设备前缀：优先从环境变量读取，否则使用编译时默认值
+static std::string getDevicePrefix()
+{
+    // 优先检查环境变量 AKVCAM_DEVICE_PREFIX
+    const char *envPrefix = std::getenv("AKVCAM_DEVICE_PREFIX");
+    if (envPrefix && strlen(envPrefix) > 0) {
+        return std::string(envPrefix);
+    }
+    
+    // 如果没有设置，使用编译时默认值
+    return std::string(AKVCAM_DEVICE_PREFIX);
+}
+
 std::string AkVCam::createDeviceId()
 {
     AkLogFunction();
+
+    // 获取设备前缀（支持环境变量）
+    std::string devicePrefix = getDevicePrefix();
 
     // List device IDs in use.
     std::vector<std::string> cameraIds;
@@ -472,7 +490,7 @@ std::string AkVCam::createDeviceId()
         /* There are no rules for device IDs in Mac. Just append an
          * incremental index to a common prefix.
          */
-        auto id = AKVCAM_DEVICE_PREFIX + std::to_string(i);
+        auto id = devicePrefix + std::to_string(i);
 
         // Check if the ID is being used, if not return it.
         if (std::find(cameraIds.begin(),

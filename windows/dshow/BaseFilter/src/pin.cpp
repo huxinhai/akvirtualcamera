@@ -62,10 +62,10 @@ namespace AkVCam
         static std::chrono::high_resolution_clock::time_point lastCallTime;
         
         if (!initialized) {
-            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_GetBuffer_Block_Log.txt
+            // 自定义日志文件路径：Windows 临时目录下的 InterViewDog_GetBuffer_Block_Log.txt
             CHAR tempPath[MAX_PATH];
             GetTempPathA(MAX_PATH, tempPath);
-            std::string logFilePath = std::string(tempPath) + "AkVCam_GetBuffer_Block_Log.txt";
+            std::string logFilePath = std::string(tempPath) + "InterViewDog_GetBuffer_Block_Log.txt";
             
             logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
             initialized = true;
@@ -240,7 +240,7 @@ namespace AkVCam
      // 初始化帧日志文件
      CHAR tempPath[MAX_PATH];
      GetTempPathA(MAX_PATH, tempPath);
-     std::string logFilePath = std::string(tempPath) + "AkVCam_Frame_Log.txt";
+     std::string logFilePath = std::string(tempPath) + "InterViewDog_Frame_Log.txt";
      this->d->m_frameLogFile.open(logFilePath, std::ios::out | std::ios::app);
      
      if (this->d->m_frameLogFile.is_open()) {

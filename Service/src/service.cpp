@@ -275,11 +275,11 @@ static void writeServiceListenLog(const std::string &step,
 #ifdef _WIN32
         CHAR tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
-        std::string logFilePath = std::string(tempPath) + "AkVCam_Service_Listen_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "InterViewDog_Service_Listen_Log.txt";
 #else
         const char *tempPath = getenv("TMPDIR");
         if (!tempPath) tempPath = "/tmp";
-        std::string logFilePath = std::string(tempPath) + "/AkVCam_Service_Listen_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "/InterViewDog_Service_Listen_Log.txt";
 #endif
         
         logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);

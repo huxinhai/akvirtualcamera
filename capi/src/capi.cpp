@@ -966,7 +966,7 @@ static void writeCapiSendLog(const std::string &step,
         // 获取 Windows 临时目录
         CHAR tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
-        std::string logFilePath = std::string(tempPath) + "AkVCam_CAPI_Send_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "InterViewDog_CAPI_Send_Log.txt";
         
         logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
         initialized = true;

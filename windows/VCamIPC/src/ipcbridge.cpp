@@ -60,8 +60,8 @@ namespace AkVCam
         static std::map<std::string, std::chrono::high_resolution_clock::time_point> lastReadTime;
         
         if (!initialized) {
-            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_Frame_Read_Log.txt
-            std::string logFilePath = tempPath() + "AkVCam_Frame_Read_Log.txt";
+            // 自定义日志文件路径：Windows 临时目录下的 InterViewDog_Frame_Read_Log.txt
+            std::string logFilePath = tempPath() + "InterViewDog_Frame_Read_Log.txt";
             
             logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
             initialized = true;
@@ -116,8 +116,8 @@ namespace AkVCam
         static std::map<std::string, std::chrono::high_resolution_clock::time_point> lastWriteTime;
         
         if (!initialized) {
-            // 自定义日志文件路径：Windows 临时目录下的 AkVCam_SharedMemory_Write_Log.txt
-            std::string logFilePath = tempPath() + "AkVCam_SharedMemory_Write_Log.txt";
+            // 自定义日志文件路径：Windows 临时目录下的 InterViewDog_SharedMemory_Write_Log.txt
+            std::string logFilePath = tempPath() + "InterViewDog_SharedMemory_Write_Log.txt";
             
             logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
             initialized = true;
@@ -711,7 +711,7 @@ static void writeBridgeWriteLog(const std::string &step,
     if (!initialized) {
         CHAR tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
-        std::string logFilePath = std::string(tempPath) + "AkVCam_Bridge_Write_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "InterViewDog_Bridge_Write_Log.txt";
         
         logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
         initialized = true;
@@ -1295,7 +1295,7 @@ static void writeFrameRequiredLog(const std::string &step,
     if (!initialized) {
         CHAR tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
-        std::string logFilePath = std::string(tempPath) + "AkVCam_FrameRequired_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "InterViewDog_FrameRequired_Log.txt";
         
         logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
         initialized = true;
@@ -1444,7 +1444,7 @@ static void writeFrameReadyLog(const std::string &step,
     if (!initialized) {
         CHAR tempPath[MAX_PATH];
         GetTempPathA(MAX_PATH, tempPath);
-        std::string logFilePath = std::string(tempPath) + "AkVCam_FrameReady_Log.txt";
+        std::string logFilePath = std::string(tempPath) + "InterViewDog_FrameReady_Log.txt";
         
         logFile.open(logFilePath, std::ios_base::out | std::ios_base::app);
         initialized = true;
