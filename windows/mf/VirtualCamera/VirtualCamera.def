@@ -16,7 +16,7 @@
 ;
 ; Web-Site: http://webcamoid.github.io/
 
-LIBRARY     InterviewDogVirtualCameraMF.dll
+LIBRARY     AkMFVirtualCamera.dll
 
 EXPORTS
             DllMain                 PRIVATE
